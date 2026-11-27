@@ -12,6 +12,9 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN)
 DB_NAME = "wpbpvz.db"
 
+# Администраторы WBPVZbot
+ADMIN_IDS = {1187266232, 655226511}
+
 INCOMES = [
     "Выдача заказов",
     "Приёмка товаров",
@@ -33,10 +36,15 @@ EXPENSES = [
 ]
 
 selected_pvz = {}
+admin_selected_pvz = {}
 
 
 def db():
     return sqlite3.connect(DB_NAME)
+
+
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
 
 
 def init_db():
@@ -76,6 +84,10 @@ def main_menu(message):
         "📊 Общий отчёт",
         "❓ Помощь"
     )
+
+    if is_admin(message.from_user.id):
+        keyboard.add("🛠 Админ-панель")
+
     bot.send_message(
         message.chat.id,
         "🤖 WBPVZbot\n\n"
@@ -101,6 +113,27 @@ def pvz_menu(chat_id, user_id):
         chat_id,
         "🏢 Управление выбранным ПВЗ\n\n"
         "Выбери нужное действие:",
+        reply_markup=keyboard
+    )
+
+
+def admin_menu(chat_id):
+    keyboard = types.ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        row_width=2
+    )
+    keyboard.add(
+        "👥 Пользователи",
+        "🏢 Все ПВЗ",
+        "📊 Общий отчёт всех ПВЗ",
+        "📈 Отчёт выбранного ПВЗ",
+        "🏠 Главное меню"
+    )
+    bot.send_message(
+        chat_id,
+        "🛠 АДМИНИСТРАТОРСКАЯ ПАНЕЛЬ\n\n"
+        "Доступ администратора подтверждён.\n"
+        "Выбери раздел:",
         reply_markup=keyboard
     )
 
@@ -149,19 +182,16 @@ def add_pvz_name(message):
         main_menu(message)
         return
 
-    name = message.text.strip()
+    name = (message.text or "").strip()
     if not name:
         bot.send_message(message.chat.id, "Введи название ПВЗ.")
         bot.register_next_step_handler(message, add_pvz_name)
         return
 
+    bot.send_message(message.chat.id, "Теперь введи адрес ПВЗ:")
     bot.register_next_step_handler(
         message,
         lambda msg: add_pvz_address(msg, name)
-    )
-    bot.send_message(
-        message.chat.id,
-        "Теперь введи адрес ПВЗ:"
     )
 
 
@@ -170,7 +200,7 @@ def add_pvz_address(message, name):
         main_menu(message)
         return
 
-    address = message.text.strip()
+    address = (message.text or "").strip()
 
     with db() as conn:
         conn.execute(
@@ -235,14 +265,16 @@ def operation_category(message, kind):
         )
         return
 
-    bot.register_next_step_handler(
-        message,
-        lambda msg: operation_amount(msg, kind, message.text)
-    )
+    category = message.text
 
     bot.send_message(
         message.chat.id,
-        f"Введи сумму в рублях за категорию «{message.text}»:"
+        f"Введи сумму в рублях за категорию «{category}»:"
+    )
+
+    bot.register_next_step_handler(
+        message,
+        lambda msg: operation_amount(msg, kind, category)
     )
 
 
@@ -257,7 +289,7 @@ def operation_amount(message, kind, category):
         )
         if amount <= 0:
             raise ValueError
-    except ValueError:
+    except (ValueError, AttributeError):
         bot.send_message(
             message.chat.id,
             "❗ Введи корректную сумму, например 15000 или 15000.50."
@@ -320,6 +352,10 @@ def report(user_id, chat_id, pvz_id=None):
                 GROUP BY kind, category
             """, (user_id, pvz_id, month)).fetchall()
 
+    send_report(chat_id, rows, month)
+
+
+def send_report(chat_id, rows, month):
     income = 0
     expense = 0
     income_lines = []
@@ -355,16 +391,190 @@ def report(user_id, chat_id, pvz_id=None):
     bot.send_message(chat_id, text)
 
 
+# ---------------- АДМИНИСТРАТОРСКИЕ ФУНКЦИИ ----------------
+
+def admin_users(chat_id):
+    with db() as conn:
+        users = conn.execute("""
+            SELECT user_id FROM pvz
+            UNION
+            SELECT user_id FROM operations
+            ORDER BY user_id
+        """).fetchall()
+
+        lines = []
+        for row in users:
+            uid = row[0]
+            pvz_count = conn.execute(
+                "SELECT COUNT(*) FROM pvz WHERE user_id=?",
+                (uid,)
+            ).fetchone()[0]
+
+            lines.append(
+                f"👤 Telegram ID: {uid}\n"
+                f"🏢 Количество ПВЗ: {pvz_count}"
+            )
+
+    if not lines:
+        bot.send_message(chat_id, "Пока нет зарегистрированных пользователей.")
+        return
+
+    bot.send_message(
+        chat_id,
+        "👥 ПОЛЬЗОВАТЕЛИ WBPVZbot\n\n" + "\n\n".join(lines)
+    )
+
+
+def admin_all_pvz(chat_id):
+    with db() as conn:
+        items = conn.execute("""
+            SELECT id, user_id, name, address
+            FROM pvz
+            ORDER BY id
+        """).fetchall()
+
+    if not items:
+        bot.send_message(chat_id, "В системе пока нет добавленных ПВЗ.")
+        return
+
+    keyboard = types.ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        row_width=1
+    )
+
+    lines = ["🏢 ВСЕ ПУНКТЫ ВЫДАЧИ\n"]
+
+    for pvz_id, owner_id, name, address in items:
+        lines.append(
+            f"ПВЗ #{pvz_id}: {name}\n"
+            f"Владелец ID: {owner_id}\n"
+            f"Адрес: {address or 'Не указан'}"
+        )
+        keyboard.add(
+            types.KeyboardButton(f"АДМИН ПВЗ #{pvz_id}")
+        )
+
+    keyboard.add("🛠 Админ-панель")
+
+    bot.send_message(
+        chat_id,
+        "\n\n".join(lines),
+        reply_markup=keyboard
+    )
+
+
+def admin_select_pvz(chat_id, pvz_id, admin_id):
+    with db() as conn:
+        item = conn.execute("""
+            SELECT id, user_id, name, address
+            FROM pvz
+            WHERE id=?
+        """, (pvz_id,)).fetchone()
+
+    if not item:
+        bot.send_message(chat_id, "ПВЗ не найден.")
+        return
+
+    admin_selected_pvz[admin_id] = (item[1], item[0])
+
+    keyboard = types.ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        row_width=1
+    )
+    keyboard.add(
+        "📈 Отчёт выбранного ПВЗ",
+        "🏢 Все ПВЗ",
+        "🛠 Админ-панель"
+    )
+
+    bot.send_message(
+        chat_id,
+        f"Выбран ПВЗ: {item[2]}\n"
+        f"Адрес: {item[3] or 'Не указан'}\n"
+        f"Владелец ID: {item[1]}",
+        reply_markup=keyboard
+    )
+
+
+def admin_report_all(chat_id):
+    month = date.today().strftime("%Y-%m")
+
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT kind, category, SUM(amount)
+            FROM operations
+            WHERE month=?
+            GROUP BY kind, category
+        """, (month,)).fetchall()
+
+    bot.send_message(
+        chat_id,
+        "🌐 ОБЩИЙ ОТЧЁТ ВСЕХ ПВЗ"
+    )
+    send_report(chat_id, rows, month)
+
+
+# ---------------- КОМАНДЫ БОТА ----------------
+
 @bot.message_handler(commands=["start"])
 def start(message):
     main_menu(message)
+
+
+@bot.message_handler(commands=["admin"])
+def admin_command(message):
+    if not is_admin(message.from_user.id):
+        bot.send_message(message.chat.id, "⛔ Доступ запрещён.")
+        return
+
+    admin_menu(message.chat.id)
 
 
 @bot.message_handler(func=lambda message: True)
 def answer(message):
     user_id = message.from_user.id
     chat_id = message.chat.id
-    text = message.text
+    text = message.text or ""
+
+    # Проверка доступа к администраторским функциям
+    if text == "🛠 Админ-панель":
+        if is_admin(user_id):
+            admin_menu(chat_id)
+        else:
+            bot.send_message(chat_id, "⛔ Доступ запрещён.")
+        return
+
+    if text in (
+        "👥 Пользователи",
+        "🏢 Все ПВЗ",
+        "📊 Общий отчёт всех ПВЗ",
+        "📈 Отчёт выбранного ПВЗ",
+        "АДМИН ПВЗ"
+    ) or text.startswith("АДМИН ПВЗ #"):
+        if not is_admin(user_id):
+            bot.send_message(chat_id, "⛔ Доступ запрещён.")
+            return
+
+        if text == "👥 Пользователи":
+            admin_users(chat_id)
+        elif text == "🏢 Все ПВЗ":
+            admin_all_pvz(chat_id)
+        elif text == "📊 Общий отчёт всех ПВЗ":
+            admin_report_all(chat_id)
+        elif text == "📈 Отчёт выбранного ПВЗ":
+            selected = admin_selected_pvz.get(user_id)
+            if selected:
+                owner_id, pvz_id = selected
+                report(owner_id, chat_id, pvz_id)
+            else:
+                bot.send_message(chat_id, "Сначала выбери ПВЗ в разделе «Все ПВЗ».")
+        elif text.startswith("АДМИН ПВЗ #"):
+            try:
+                pvz_id = int(text.split("#")[1])
+                admin_select_pvz(chat_id, pvz_id, user_id)
+            except (ValueError, IndexError):
+                bot.send_message(chat_id, "Не удалось выбрать ПВЗ.")
+        return
 
     if text == "🏠 Главное меню":
         main_menu(message)
